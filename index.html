@@ -52,10 +52,15 @@
     <div class="coords" id="coords"></div>
   </div>
 
-  <div class="hint">Joystick: left/right pan · up zoom in · down zoom out</div>
+  <div class="hint">Joystick pans (up/down/left/right) · Use + / − to zoom</div>
 
   <div id="joy" style="position:fixed;left:18px;bottom:18px;z-index:12;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.22);backdrop-filter:blur(10px);touch-action:none;">
     <div id="joyKnob" style="position:absolute;left:50%;top:50%;width:52px;height:52px;transform:translate(-50%,-50%);border-radius:50%;background:rgba(160,130,255,.5);border:1px solid rgba(255,255,255,.35);"></div>
+  </div>
+
+  <div style="position:fixed;left:152px;bottom:28px;z-index:12;display:flex;gap:8px;">
+    <button id="zoomInBtn" style="width:44px;height:44px;border-radius:12px;font-size:24px;line-height:1;">+</button>
+    <button id="zoomOutBtn" style="width:44px;height:44px;border-radius:12px;font-size:24px;line-height:1;">−</button>
   </div>
 
   <script src="main.js"></script>

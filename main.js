@@ -8,6 +8,8 @@ const audioBtn = document.getElementById('audioToggle');
 const volInput = document.getElementById('volume');
 const joy = document.getElementById('joy');
 const joyKnob = document.getElementById('joyKnob');
+const zoomInBtn = document.getElementById('zoomInBtn');
+const zoomOutBtn = document.getElementById('zoomOutBtn');
 
 const state = {
   w: 0, h: 0, dpr: 1,
@@ -17,6 +19,7 @@ const state = {
   targetX: -0.5, targetY: 0.0, targetScale: 3.0,
   phase: parseFloat(phaseInput.value),
   joyX: 0, joyY: 0,
+  zoomHold: 0,
   keys: new Set(),
   quality: 0.62,
   maxIter: 180,
@@ -133,24 +136,20 @@ function drawFrame() {
 
 function updateTarget(dt) {
   const panKeyX = (state.keys.has('arrowright') || state.keys.has('d') ? 1 : 0) + (state.keys.has('arrowleft') || state.keys.has('a') ? -1 : 0);
-  const zoomKey = (state.keys.has('arrowup') || state.keys.has('w') ? 1 : 0) + (state.keys.has('arrowdown') || state.keys.has('s') ? -1 : 0);
+  const panKeyY = (state.keys.has('arrowdown') || state.keys.has('s') ? 1 : 0) + (state.keys.has('arrowup') || state.keys.has('w') ? -1 : 0);
+  const zoomKey = (state.keys.has('e') ? 1 : 0) + (state.keys.has('q') ? -1 : 0);
 
-  const joyX = state.joyX;
-  const joyY = state.joyY;
+  const panX = clamp(panKeyX + state.joyX, -1, 1);
+  const panY = clamp(panKeyY + state.joyY, -1, 1);
+  const zoomControl = clamp(zoomKey + state.zoomHold, -1, 1);
 
-  const pan = clamp(panKeyX + joyX, -1, 1);
-  const zoomControl = clamp(zoomKey - joyY, -1, 1); // up => zoom in
+  // Full 2D pan
+  const panSpeed = state.targetScale * 0.85 * dt;
+  state.targetX += panX * panSpeed;
+  state.targetY += panY * panSpeed;
 
-  // Pan speed scales with zoom level to keep control intuitive.
-  const panSpeed = state.targetScale * 0.8 * dt;
-  state.targetX += pan * panSpeed;
-
-  const zoomRate = Math.exp(-zoomControl * dt * 1.9);
+  const zoomRate = Math.exp(-zoomControl * dt * 2.2);
   state.targetScale = clamp(state.targetScale * zoomRate, 1e-9, 3.0);
-
-  // subtle vertical drift from joystick x+y combo for selecting spots
-  const verticalNudge = (joyX * joyY) * state.targetScale * dt * 0.22;
-  state.targetY += verticalNudge;
 
   // smooth camera easing = ultra smooth feel
   const smooth = 1 - Math.exp(-dt * 10.0);
@@ -239,6 +238,23 @@ phaseInput.addEventListener('input', () => {
   joy.addEventListener('pointercancel', end);
 })();
 
+function bindHoldButton(el, dir) {
+  if (!el) return;
+  const start = (e) => {
+    e.preventDefault();
+    state.zoomHold = dir;
+  };
+  const stop = () => {
+    if (state.zoomHold === dir) state.zoomHold = 0;
+  };
+  el.addEventListener('pointerdown', start);
+  el.addEventListener('pointerup', stop);
+  el.addEventListener('pointercancel', stop);
+  el.addEventListener('pointerleave', stop);
+}
+bindHoldButton(zoomInBtn, 1);
+bindHoldButton(zoomOutBtn, -1);
+
 // Audio: dramatic changes from fractal stats + zoom
 let ac = null, master = null, filter = null, voices = [], lfo = null, lfoGain = null, running = false;
 
@@ -298,7 +314,7 @@ function updateAudio() {
   const c = state.complexity;
   const avg = state.avgEscape;
   const zoomNorm = clamp(Math.log10(3 / state.scale + 1) / 6, 0, 1);
-  const motion = clamp(Math.abs(state.joyX) + Math.abs(state.joyY), 0, 1);
+  const motion = clamp(Math.abs(state.joyX) + Math.abs(state.joyY) + Math.abs(state.zoomHold), 0, 1);
 
   const active = 2 + Math.floor(c * 3) + Math.floor(zoomNorm * 3); // 2..8
   voices.forEach((v, i) => {
