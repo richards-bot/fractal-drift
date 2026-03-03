@@ -255,43 +255,92 @@ function bindHoldButton(el, dir) {
 bindHoldButton(zoomInBtn, 1);
 bindHoldButton(zoomOutBtn, -1);
 
-// Audio: dramatic changes from fractal stats + zoom
-let ac = null, master = null, filter = null, voices = [], lfo = null, lfoGain = null, running = false;
+// Audio: multi-part engine (drone + pulse + arp + texture), driven by fractal maths
+let ac = null, master = null, mixFilter = null, running = false;
+let drones = [], pulse = null, arp = null, texture = null;
+const audioState = { nextStep: 0, step: 0, bpm: 88 };
+
+function midiToHz(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+function makeVoice(type, freq, gainValue, bus) {
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.value = gainValue;
+  osc.connect(gain);
+  gain.connect(bus);
+  osc.start();
+  return { osc, gain };
+}
 
 function setupAudio() {
   ac = new (window.AudioContext || window.webkitAudioContext)();
-  master = ac.createGain();
-  filter = ac.createBiquadFilter();
-  filter.type = 'bandpass';
-  filter.frequency.value = 600;
-  filter.Q.value = 1;
 
+  master = ac.createGain();
   master.gain.value = parseFloat(volInput.value);
-  filter.connect(master);
+
+  mixFilter = ac.createBiquadFilter();
+  mixFilter.type = 'lowpass';
+  mixFilter.frequency.value = 900;
+  mixFilter.Q.value = 1.2;
+
+  mixFilter.connect(master);
   master.connect(ac.destination);
 
-  const base = 49; // darker base
-  const semis = [0, 3, 7, 10, 12, 15, 19, 24];
-  voices = semis.map((s, i) => {
-    const osc = ac.createOscillator();
-    const gain = ac.createGain();
-    osc.type = ['sine', 'triangle', 'sawtooth', 'square'][i % 4];
-    osc.frequency.value = base * Math.pow(2, s / 12);
-    gain.gain.value = 0;
-    osc.connect(gain);
-    gain.connect(filter);
-    osc.start();
-    return { osc, gain };
-  });
+  // Part 1: ambient drone stack
+  const droneBus = ac.createGain();
+  droneBus.gain.value = 0.9;
+  droneBus.connect(mixFilter);
+  const droneMidi = [36, 43, 48, 55];
+  drones = droneMidi.map((m, i) => makeVoice(['sine', 'triangle', 'sawtooth', 'triangle'][i], midiToHz(m), 0.0, droneBus));
 
-  lfo = ac.createOscillator();
-  lfoGain = ac.createGain();
-  lfo.type = 'triangle';
-  lfo.frequency.value = 0.06;
-  lfoGain.gain.value = 120;
-  lfo.connect(lfoGain);
-  lfoGain.connect(filter.frequency);
-  lfo.start();
+  // Part 2: pulse/chord stabs
+  const pulseBus = ac.createGain();
+  pulseBus.gain.value = 0.8;
+  const pulseFilter = ac.createBiquadFilter();
+  pulseFilter.type = 'bandpass';
+  pulseFilter.frequency.value = 700;
+  pulseFilter.Q.value = 2.5;
+  pulseBus.connect(pulseFilter);
+  pulseFilter.connect(mixFilter);
+  pulse = { bus: pulseBus, filter: pulseFilter, voices: [
+    makeVoice('square', midiToHz(60), 0.0, pulseBus),
+    makeVoice('triangle', midiToHz(67), 0.0, pulseBus),
+    makeVoice('sawtooth', midiToHz(72), 0.0, pulseBus),
+  ]};
+
+  // Part 3: high arp layer
+  const arpBus = ac.createGain();
+  arpBus.gain.value = 0.75;
+  const arpFilter = ac.createBiquadFilter();
+  arpFilter.type = 'highpass';
+  arpFilter.frequency.value = 900;
+  arpBus.connect(arpFilter);
+  arpFilter.connect(mixFilter);
+  arp = { bus: arpBus, filter: arpFilter, voice: makeVoice('sawtooth', midiToHz(84), 0.0, arpBus) };
+
+  // Part 4: textured noise rhythm
+  const noiseBuffer = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / d.length * 2.6);
+  const noise = ac.createBufferSource();
+  noise.buffer = noiseBuffer;
+  noise.loop = true;
+  const noiseGain = ac.createGain();
+  noiseGain.gain.value = 0.0;
+  const noiseFilter = ac.createBiquadFilter();
+  noiseFilter.type = 'bandpass';
+  noiseFilter.frequency.value = 1800;
+  noiseFilter.Q.value = 1.5;
+  noise.connect(noiseFilter);
+  noiseFilter.connect(noiseGain);
+  noiseGain.connect(mixFilter);
+  noise.start();
+  texture = { noise, gain: noiseGain, filter: noiseFilter };
+
+  audioState.nextStep = ac.currentTime;
+  audioState.step = 0;
 
   if (ac.state === 'suspended') ac.resume();
   running = true;
@@ -300,37 +349,92 @@ function setupAudio() {
 
 function teardownAudio() {
   if (!ac) return;
-  voices.forEach(v => { try { v.osc.stop(); } catch {} });
-  try { lfo?.stop(); } catch {}
+  [...drones, ...(pulse?.voices || []), arp?.voice].forEach(v => { if (!v) return; try { v.osc.stop(); } catch {} });
+  try { texture?.noise.stop(); } catch {}
   try { ac.close(); } catch {}
-  voices = [];
+  drones = [];
+  pulse = null;
+  arp = null;
+  texture = null;
   ac = null;
   running = false;
   audioBtn.textContent = 'Enable';
 }
 
-function updateAudio() {
-  if (!running || !ac) return;
+function scheduleRhythm() {
   const c = state.complexity;
   const avg = state.avgEscape;
   const zoomNorm = clamp(Math.log10(3 / state.scale + 1) / 6, 0, 1);
   const motion = clamp(Math.abs(state.joyX) + Math.abs(state.joyY) + Math.abs(state.zoomHold), 0, 1);
 
-  const active = 2 + Math.floor(c * 3) + Math.floor(zoomNorm * 3); // 2..8
-  voices.forEach((v, i) => {
-    const on = i < active;
-    const amp = on ? (0.01 + 0.03 * c + 0.02 * zoomNorm) * Math.max(0.25, 1 - i * 0.1) : 0;
-    v.gain.gain.setTargetAtTime(amp, ac.currentTime, 0.08);
+  // math-driven tempo and harmonic centers
+  audioState.bpm = 68 + c * 64 + motion * 20;
+  const stepDur = 60 / audioState.bpm / 2; // 1/8 notes
 
-    const dramatic = (avg - 0.5) * 100 + zoomNorm * 120 + Math.sin(ac.currentTime * (0.4 + i * 0.07)) * (6 + motion * 12);
-    v.osc.detune.setTargetAtTime(dramatic, ac.currentTime, 0.12);
+  const roots = [36, 38, 41, 43, 45, 48];
+  const modes = [0, 3, 7, 10, 12, 15, 19];
+  const root = roots[Math.floor(clamp(avg, 0, 0.999) * roots.length)];
+  const modeShift = Math.floor(clamp(c, 0, 0.999) * 3) * 2;
+
+  while (audioState.nextStep < ac.currentTime + 0.12) {
+    const t = audioState.nextStep;
+    const step = audioState.step++;
+
+    // pulse part (kicks in strongly at higher complexity)
+    pulse.voices.forEach((v, i) => {
+      const interval = modes[(step + i * 2 + modeShift) % modes.length];
+      const freq = midiToHz(root + 24 + interval);
+      v.osc.frequency.setValueAtTime(freq, t);
+      const hit = ((step + i) % (4 - Math.min(2, Math.floor(c * 3)))) === 0;
+      const peak = hit ? (0.015 + c * 0.07 + zoomNorm * 0.02) : 0.0;
+      v.gain.gain.cancelScheduledValues(t);
+      v.gain.gain.setValueAtTime(0.0001, t);
+      v.gain.gain.linearRampToValueAtTime(peak, t + 0.012);
+      v.gain.gain.exponentialRampToValueAtTime(0.0001, t + stepDur * (0.5 + c * 0.5));
+    });
+
+    // arp part (very reactive and dramatic in deep zoom)
+    const arpInt = modes[(step * 3 + modeShift + Math.floor(zoomNorm * 6)) % modes.length];
+    arp.voice.osc.frequency.setValueAtTime(midiToHz(root + 36 + arpInt + (step % 2 ? 12 : 0)), t);
+    const arpPeak = 0.008 + c * 0.055 + zoomNorm * 0.05;
+    arp.voice.gain.gain.cancelScheduledValues(t);
+    arp.voice.gain.gain.setValueAtTime(0.0001, t);
+    arp.voice.gain.gain.linearRampToValueAtTime(arpPeak, t + 0.006);
+    arp.voice.gain.gain.exponentialRampToValueAtTime(0.0001, t + stepDur * 0.7);
+
+    // texture rhythm (noise hat-like patterns)
+    const texHit = ((step + Math.floor(avg * 8)) % 2 === 0) || (c > 0.72 && step % 3 === 0);
+    const texPeak = texHit ? (0.002 + c * 0.03 + motion * 0.02) : 0.0;
+    texture.gain.gain.cancelScheduledValues(t);
+    texture.gain.gain.setValueAtTime(0.0001, t);
+    texture.gain.gain.linearRampToValueAtTime(texPeak, t + 0.004);
+    texture.gain.gain.exponentialRampToValueAtTime(0.0001, t + stepDur * 0.35);
+
+    audioState.nextStep += stepDur;
+  }
+
+  // continuous drone morph
+  drones.forEach((v, i) => {
+    const base = root + [0, 7, 12, 19][i];
+    const bend = (avg - 0.5) * 40 + Math.sin(ac.currentTime * (0.1 + i * 0.04)) * (5 + c * 9);
+    v.osc.frequency.setTargetAtTime(midiToHz(base), ac.currentTime, 0.4);
+    v.osc.detune.setTargetAtTime(bend, ac.currentTime, 0.2);
+    const amp = (0.008 + c * 0.035 + zoomNorm * 0.018) * (1 - i * 0.16);
+    v.gain.gain.setTargetAtTime(Math.max(0, amp), ac.currentTime, 0.18);
   });
 
-  filter.frequency.setTargetAtTime(180 + c * 1800 + zoomNorm * 2400, ac.currentTime, 0.08);
-  filter.Q.setTargetAtTime(0.8 + c * 7 + motion * 3, ac.currentTime, 0.1);
-  lfo.frequency.setTargetAtTime(0.04 + c * 0.9 + motion * 0.5, ac.currentTime, 0.1);
-  lfoGain.gain.setTargetAtTime(50 + c * 380 + zoomNorm * 220, ac.currentTime, 0.1);
+  // global spectral motion from fractal math
+  mixFilter.frequency.setTargetAtTime(260 + c * 3000 + zoomNorm * 1800, ac.currentTime, 0.1);
+  mixFilter.Q.setTargetAtTime(0.7 + c * 6 + motion * 2.5, ac.currentTime, 0.1);
+  pulse.filter.frequency.setTargetAtTime(320 + c * 1400 + (avg * 600), ac.currentTime, 0.12);
+  arp.filter.frequency.setTargetAtTime(900 + zoomNorm * 2600 + c * 600, ac.currentTime, 0.12);
+  texture.filter.frequency.setTargetAtTime(1400 + c * 2600 + motion * 900, ac.currentTime, 0.1);
   master.gain.setTargetAtTime(parseFloat(volInput.value), ac.currentTime, 0.05);
+}
+
+function updateAudio() {
+  if (!running || !ac) return;
+  scheduleRhythm();
 }
 
 audioBtn.addEventListener('click', () => running ? teardownAudio() : setupAudio());
