@@ -26,6 +26,11 @@ const state = {
   complexity: 0,
   avgEscape: 0,
   frameMs: 16,
+  renderRow: 0,
+  lastRenderX: NaN,
+  lastRenderY: NaN,
+  lastRenderScale: NaN,
+  motionEnergy: 0,
 };
 
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
@@ -47,6 +52,7 @@ function resize() {
   state.offCtx = state.off.getContext('2d', { alpha: false });
   state.img = state.offCtx.createImageData(state.renderW, state.renderH);
   state.px = state.img.data;
+  state.renderRow = 0;
 }
 window.addEventListener('resize', resize);
 resize();
@@ -59,68 +65,69 @@ function palette(t) {
   return [0.5 + 0.5 * Math.cos(a), 0.5 + 0.5 * Math.cos(b), 0.5 + 0.5 * Math.cos(c)];
 }
 
-function renderMandelbrot() {
+function escapeValue(cx, cy, maxIter) {
+  let zx = 0, zy = 0, i = 0, m2 = 0;
+  for (; i < maxIter; i++) {
+    const zx2 = zx * zx - zy * zy + cx;
+    zy = 2 * zx * zy + cy;
+    zx = zx2;
+    m2 = zx * zx + zy * zy;
+    if (m2 > 256) break;
+  }
+  if (i >= maxIter) return 1;
+  const logZn = Math.log(m2) / 2;
+  const nu = Math.log(Math.max(logZn / Math.log(2), 1e-6)) / Math.log(2);
+  const mu = i + 1 - nu;
+  return clamp(mu / maxIter, 0, 1);
+}
+
+function updateFractalMetrics() {
+  const N = 64;
+  let sum = 0, sumSq = 0;
+  const maxIter = Math.max(90, Math.floor(state.maxIter * 0.65));
+  for (let i = 0; i < N; i++) {
+    const a = (i / N) * Math.PI * 2;
+    const r = (0.12 + (i % 8) * 0.08) * state.scale;
+    const cx = state.centerX + Math.cos(a) * r;
+    const cy = state.centerY + Math.sin(a * 1.7) * r;
+    const t = escapeValue(cx, cy, maxIter);
+    sum += t;
+    sumSq += t * t;
+  }
+  const avg = sum / N;
+  const variance = Math.max(0, sumSq / N - avg * avg);
+  const complexity = clamp(Math.sqrt(variance) * 2.5 + (1 - Math.abs(avg - 0.5) * 2) * 0.9, 0, 1);
+  state.avgEscape = lerp(state.avgEscape, avg, 0.24);
+  state.complexity = lerp(state.complexity, complexity, 0.24);
+}
+
+function renderMandelbrotChunk(rows = 48) {
   const { renderW: W, renderH: H, px } = state;
   const minSide = Math.min(W, H);
   const maxIter = state.maxIter;
-
-  let sum = 0, sumSq = 0, count = 0;
-  let idx = 0;
-
-  for (let y = 0; y < H; y++) {
+  let y = state.renderRow;
+  for (let r = 0; r < rows && y < H; r++, y++) {
     const v = (y - H * 0.5) / minSide;
+    let idx = (y * W) * 4;
     for (let x = 0; x < W; x++) {
       const u = (x - W * 0.5) / minSide;
       const cx = state.centerX + u * state.scale;
       const cy = state.centerY + v * state.scale;
-
-      let zx = 0, zy = 0, i = 0, m2 = 0;
-      for (; i < maxIter; i++) {
-        const zx2 = zx * zx - zy * zy + cx;
-        zy = 2 * zx * zy + cy;
-        zx = zx2;
-        m2 = zx * zx + zy * zy;
-        if (m2 > 256) break;
-      }
-
-      if (i >= maxIter) {
-        px[idx++] = 2;
-        px[idx++] = 3;
-        px[idx++] = 8;
-        px[idx++] = 255;
-        sum += 1;
-        sumSq += 1;
-        count++;
+      const t = escapeValue(cx, cy, maxIter);
+      if (t >= 0.9999) {
+        px[idx++] = 2; px[idx++] = 3; px[idx++] = 8; px[idx++] = 255;
       } else {
-        const logZn = Math.log(m2) / 2;
-        const nu = Math.log(Math.max(logZn / Math.log(2), 1e-6)) / Math.log(2);
-        const mu = i + 1 - nu;
-        const t = clamp(mu / maxIter, 0, 1);
-        const [r, g, b] = palette(t);
-
-        // Edge emphasis so screen changes are visually dramatic.
-        const edge = Math.pow(1 - Math.abs(t - 0.5) * 2, 1.6);
+        const [rCol, gCol, bCol] = palette(t);
+        const edge = Math.pow(1 - Math.abs(t - 0.5) * 2, 1.55);
         const boost = 0.25 + edge * 0.95;
-
-        px[idx++] = clamp(Math.floor((r * boost) * 255), 0, 255);
-        px[idx++] = clamp(Math.floor((g * boost) * 255), 0, 255);
-        px[idx++] = clamp(Math.floor((b * boost) * 255), 0, 255);
+        px[idx++] = clamp(Math.floor(rCol * boost * 255), 0, 255);
+        px[idx++] = clamp(Math.floor(gCol * boost * 255), 0, 255);
+        px[idx++] = clamp(Math.floor(bCol * boost * 255), 0, 255);
         px[idx++] = 255;
-
-        sum += t;
-        sumSq += t * t;
-        count++;
       }
     }
   }
-
-  const avg = count ? sum / count : 0;
-  const variance = count ? Math.max(0, sumSq / count - avg * avg) : 0;
-  const complexity = clamp(Math.sqrt(variance) * 2.2 + (1 - Math.abs(avg - 0.5) * 2) * 0.8, 0, 1);
-
-  state.avgEscape = lerp(state.avgEscape, avg, 0.22);
-  state.complexity = lerp(state.complexity, complexity, 0.22);
-
+  state.renderRow = y >= H ? 0 : y;
   state.offCtx.putImageData(state.img, 0, 0);
 }
 
@@ -131,7 +138,8 @@ function drawFrame() {
   ctx.drawImage(state.off, 0, 0, state.w, state.h);
 
   const zoom = 3 / state.scale;
-  coords.textContent = `center=(${state.centerX.toPrecision(10)}, ${state.centerY.toPrecision(10)}) zoom=${zoom.toFixed(2)}x complexity=${state.complexity.toFixed(2)}`;
+  const fps = 1000 / Math.max(1, state.frameMs);
+  coords.textContent = `center=(${state.centerX.toPrecision(10)}, ${state.centerY.toPrecision(10)}) zoom=${zoom.toFixed(2)}x complexity=${state.complexity.toFixed(2)} fps=${fps.toFixed(0)}`;
 }
 
 function updateTarget(dt) {
@@ -153,9 +161,23 @@ function updateTarget(dt) {
 
   // smooth camera easing = ultra smooth feel
   const smooth = 1 - Math.exp(-dt * 10.0);
+  const prevX = state.centerX, prevY = state.centerY, prevS = state.scale;
   state.centerX = lerp(state.centerX, state.targetX, smooth);
   state.centerY = lerp(state.centerY, state.targetY, smooth);
   state.scale = lerp(state.scale, state.targetScale, smooth);
+
+  const motion = Math.abs(state.centerX - prevX) + Math.abs(state.centerY - prevY) + Math.abs(Math.log(state.scale / prevS));
+  state.motionEnergy = lerp(state.motionEnergy, motion * 120, 0.25);
+
+  const viewChanged = Math.abs(state.centerX - state.lastRenderX) > state.scale * 0.0006
+    || Math.abs(state.centerY - state.lastRenderY) > state.scale * 0.0006
+    || Math.abs(Math.log(state.scale / state.lastRenderScale || 1)) > 0.0008;
+  if (viewChanged) {
+    state.renderRow = 0;
+    state.lastRenderX = state.centerX;
+    state.lastRenderY = state.centerY;
+    state.lastRenderScale = state.scale;
+  }
 }
 
 // Simple drag to move target spot
@@ -365,16 +387,19 @@ function scheduleRhythm() {
   const c = state.complexity;
   const avg = state.avgEscape;
   const zoomNorm = clamp(Math.log10(3 / state.scale + 1) / 6, 0, 1);
-  const motion = clamp(Math.abs(state.joyX) + Math.abs(state.joyY) + Math.abs(state.zoomHold), 0, 1);
+  const motion = clamp(Math.abs(state.joyX) + Math.abs(state.joyY) + Math.abs(state.zoomHold) + state.motionEnergy * 0.8, 0, 1.6);
+
+  const region = Math.abs(Math.floor(state.centerX * 1e5) ^ Math.floor(state.centerY * 1e5));
+  const patternSeed = region % 16;
 
   // math-driven tempo and harmonic centers
-  audioState.bpm = 68 + c * 64 + motion * 20;
-  const stepDur = 60 / audioState.bpm / 2; // 1/8 notes
+  audioState.bpm = 64 + c * 72 + zoomNorm * 18 + motion * 10;
+  const stepDur = 60 / audioState.bpm / 4; // 1/16 notes for more rhythmic detail
 
-  const roots = [36, 38, 41, 43, 45, 48];
-  const modes = [0, 3, 7, 10, 12, 15, 19];
+  const roots = [33, 36, 38, 41, 43, 45, 48, 50];
+  const modes = [0, 2, 3, 7, 10, 12, 15, 19];
   const root = roots[Math.floor(clamp(avg, 0, 0.999) * roots.length)];
-  const modeShift = Math.floor(clamp(c, 0, 0.999) * 3) * 2;
+  const modeShift = (Math.floor(clamp(c, 0, 0.999) * 4) * 2 + (patternSeed % 3)) % modes.length;
 
   while (audioState.nextStep < ac.currentTime + 0.12) {
     const t = audioState.nextStep;
@@ -382,29 +407,32 @@ function scheduleRhythm() {
 
     // pulse part (kicks in strongly at higher complexity)
     pulse.voices.forEach((v, i) => {
-      const interval = modes[(step + i * 2 + modeShift) % modes.length];
-      const freq = midiToHz(root + 24 + interval);
+      const interval = modes[(step + i * (2 + (patternSeed % 2)) + modeShift) % modes.length];
+      const freq = midiToHz(root + 24 + interval + (zoomNorm > 0.7 && i === 2 ? 12 : 0));
       v.osc.frequency.setValueAtTime(freq, t);
-      const hit = ((step + i) % (4 - Math.min(2, Math.floor(c * 3)))) === 0;
-      const peak = hit ? (0.015 + c * 0.07 + zoomNorm * 0.02) : 0.0;
+
+      const mask = [0b1000100010001000, 0b1001001010010010, 0b1010101000101010, 0b1110100011101000][(patternSeed + i) % 4];
+      const hit = ((mask >> (step % 16)) & 1) === 1;
+      const peak = hit ? (0.01 + c * 0.08 + zoomNorm * 0.03 + motion * 0.02) : 0.0;
       v.gain.gain.cancelScheduledValues(t);
       v.gain.gain.setValueAtTime(0.0001, t);
-      v.gain.gain.linearRampToValueAtTime(peak, t + 0.012);
-      v.gain.gain.exponentialRampToValueAtTime(0.0001, t + stepDur * (0.5 + c * 0.5));
+      v.gain.gain.linearRampToValueAtTime(peak, t + 0.006);
+      v.gain.gain.exponentialRampToValueAtTime(0.0001, t + stepDur * (0.55 + c * 0.35));
     });
 
     // arp part (very reactive and dramatic in deep zoom)
-    const arpInt = modes[(step * 3 + modeShift + Math.floor(zoomNorm * 6)) % modes.length];
-    arp.voice.osc.frequency.setValueAtTime(midiToHz(root + 36 + arpInt + (step % 2 ? 12 : 0)), t);
-    const arpPeak = 0.008 + c * 0.055 + zoomNorm * 0.05;
+    const arpInt = modes[(step * (2 + (patternSeed % 3)) + modeShift + Math.floor(zoomNorm * 8)) % modes.length];
+    const octaveJump = ((step + patternSeed) % (zoomNorm > 0.6 ? 3 : 5) === 0) ? 12 : 0;
+    arp.voice.osc.frequency.setValueAtTime(midiToHz(root + 36 + arpInt + octaveJump), t);
+    const arpPeak = 0.006 + c * 0.065 + zoomNorm * 0.065 + motion * 0.02;
     arp.voice.gain.gain.cancelScheduledValues(t);
     arp.voice.gain.gain.setValueAtTime(0.0001, t);
-    arp.voice.gain.gain.linearRampToValueAtTime(arpPeak, t + 0.006);
-    arp.voice.gain.gain.exponentialRampToValueAtTime(0.0001, t + stepDur * 0.7);
+    arp.voice.gain.gain.linearRampToValueAtTime(arpPeak, t + 0.0035);
+    arp.voice.gain.gain.exponentialRampToValueAtTime(0.0001, t + stepDur * 0.55);
 
-    // texture rhythm (noise hat-like patterns)
-    const texHit = ((step + Math.floor(avg * 8)) % 2 === 0) || (c > 0.72 && step % 3 === 0);
-    const texPeak = texHit ? (0.002 + c * 0.03 + motion * 0.02) : 0.0;
+    // texture rhythm (noise hats) with region-varying syncopation
+    const texHit = ((step + patternSeed) % 2 === 0) || ((step + Math.floor(avg * 16)) % 5 === 0) || (c > 0.72 && step % 3 === 0);
+    const texPeak = texHit ? (0.002 + c * 0.035 + motion * 0.03 + zoomNorm * 0.02) : 0.0;
     texture.gain.gain.cancelScheduledValues(t);
     texture.gain.gain.setValueAtTime(0.0001, t);
     texture.gain.gain.linearRampToValueAtTime(texPeak, t + 0.004);
@@ -424,11 +452,11 @@ function scheduleRhythm() {
   });
 
   // global spectral motion from fractal math
-  mixFilter.frequency.setTargetAtTime(260 + c * 3000 + zoomNorm * 1800, ac.currentTime, 0.1);
-  mixFilter.Q.setTargetAtTime(0.7 + c * 6 + motion * 2.5, ac.currentTime, 0.1);
-  pulse.filter.frequency.setTargetAtTime(320 + c * 1400 + (avg * 600), ac.currentTime, 0.12);
-  arp.filter.frequency.setTargetAtTime(900 + zoomNorm * 2600 + c * 600, ac.currentTime, 0.12);
-  texture.filter.frequency.setTargetAtTime(1400 + c * 2600 + motion * 900, ac.currentTime, 0.1);
+  mixFilter.frequency.setTargetAtTime(220 + c * 3600 + zoomNorm * 2200 + motion * 400, ac.currentTime, 0.08);
+  mixFilter.Q.setTargetAtTime(0.8 + c * 7.5 + motion * 3.2, ac.currentTime, 0.08);
+  pulse.filter.frequency.setTargetAtTime(250 + c * 1800 + (avg * 800) + (patternSeed * 20), ac.currentTime, 0.1);
+  arp.filter.frequency.setTargetAtTime(700 + zoomNorm * 3300 + c * 1200, ac.currentTime, 0.1);
+  texture.filter.frequency.setTargetAtTime(1100 + c * 3200 + motion * 1400, ac.currentTime, 0.08);
   master.gain.setTargetAtTime(parseFloat(volInput.value), ac.currentTime, 0.05);
 }
 
@@ -449,17 +477,23 @@ function tick(now) {
   updateTarget(dt);
 
   // dynamic quality/perf tuning
-  if (state.frameMs > 27 && state.quality > 0.46) {
+  if (state.frameMs > 26 && state.quality > 0.42) {
     state.quality -= 0.01;
-    state.maxIter = Math.max(120, state.maxIter - 1);
+    state.maxIter = Math.max(96, state.maxIter - 2);
     resize();
-  } else if (state.frameMs < 18 && state.quality < 0.82) {
+  } else if (state.frameMs < 17 && state.quality < 0.86) {
     state.quality += 0.005;
-    state.maxIter = Math.min(260, state.maxIter + 1);
+    state.maxIter = Math.min(300, state.maxIter + 1);
     resize();
   }
 
-  renderMandelbrot();
+  // Fast responsiveness while moving, higher detail when settled.
+  const moving = state.motionEnergy > 0.025;
+  const rows = moving ? 120 : 48;
+  if (moving) state.maxIter = Math.max(96, Math.min(state.maxIter, 180));
+  renderMandelbrotChunk(rows);
+  updateFractalMetrics();
+
   drawFrame();
   updateAudio();
 
