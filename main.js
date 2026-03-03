@@ -31,6 +31,8 @@ let renderW = 0;
 let renderH = 0;
 let imageData = null;
 let pixels = null;
+let renderCanvas = null;
+let renderCtx = null;
 let needsRender = true;
 let row = 0;
 
@@ -43,7 +45,12 @@ function resize() {
   renderW = Math.max(240, Math.min(maxW, Math.floor(canvas.width * 0.65)));
   renderH = Math.max(160, Math.floor(renderW * (canvas.height / canvas.width)));
 
-  imageData = new ImageData(renderW, renderH);
+  renderCanvas = document.createElement('canvas');
+  renderCanvas.width = renderW;
+  renderCanvas.height = renderH;
+  renderCtx = renderCanvas.getContext('2d', { alpha: false });
+
+  imageData = renderCtx.createImageData(renderW, renderH);
   pixels = imageData.data;
   needsRender = true;
   row = 0;
@@ -230,7 +237,7 @@ function setupAudio() {
       const g = ac.createGain();
       o.type = ['sine', 'triangle', 'sawtooth'][i % 3];
       o.frequency.value = f;
-      g.gain.value = 0.0;
+      g.gain.value = 0.03;
 
       if (typeof ac.createStereoPanner === 'function') {
         const p = ac.createStereoPanner();
@@ -286,13 +293,11 @@ function drawToScreen() {
   ctx.fillStyle = '#05070d';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  if (imageData) {
-    const sx = canvas.width / renderW;
-    const sy = canvas.height / renderH;
+  if (imageData && renderCtx && renderCanvas) {
+    renderCtx.putImageData(imageData, 0, 0);
     ctx.save();
     ctx.imageSmoothingEnabled = true;
-    ctx.setTransform(sx, 0, 0, sy, 0, 0);
-    ctx.putImageData(imageData, 0, 0);
+    ctx.drawImage(renderCanvas, 0, 0, canvas.width, canvas.height);
     ctx.restore();
   }
 
