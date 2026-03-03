@@ -4,14 +4,7 @@ const ctx = canvas.getContext('2d', { alpha: false });
 function showFatal(message) {
   console.error(message);
   const box = document.createElement('div');
-  box.style.cssText = `
-    position:fixed;left:18px;bottom:18px;z-index:9999;
-    max-width:min(640px,calc(100vw - 36px));
-    background:rgba(120,20,20,.86);color:#fff;
-    border:1px solid rgba(255,255,255,.22);border-radius:12px;
-    padding:10px 12px;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;
-    white-space:pre-wrap;backdrop-filter:blur(6px)
-  `;
+  box.style.cssText = `position:fixed;left:18px;bottom:150px;z-index:9999;max-width:min(680px,calc(100vw - 36px));background:rgba(120,20,20,.88);color:#fff;border:1px solid rgba(255,255,255,.22);border-radius:12px;padding:10px 12px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;`;
   box.textContent = message;
   document.body.appendChild(box);
 }
@@ -21,243 +14,301 @@ if (!ctx) {
   throw new Error('2D context unavailable');
 }
 
-let center = { x: -0.5, y: 0.0 };
-let scale = 2.5;
-let phase = parseFloat(document.getElementById('phase').value);
-let dragging = false;
-let last = { x: 0, y: 0 };
+const coords = document.getElementById('coords');
+const phaseInput = document.getElementById('phase');
+const audioBtn = document.getElementById('audioToggle');
+const volInput = document.getElementById('volume');
+const joy = document.getElementById('joy');
+const joyKnob = document.getElementById('joyKnob');
 
-let renderW = 0;
-let renderH = 0;
-let imageData = null;
-let pixels = null;
-let renderCanvas = null;
-let renderCtx = null;
-let needsRender = true;
-let row = 0;
+const state = {
+  w: 0, h: 0,
+  renderW: 360, renderH: 210,
+  imageData: null, pixels: null,
+  phase: parseFloat(phaseInput.value),
+  cam: { x: -0.6, y: 0.0, z: 0.0, yaw: 0.0 },
+  joy: { x: 0, y: 0 },
+  keys: new Set(),
+  complexity: 0.2,
+  avgEscape: 0.0,
+};
+
+let renderCanvas, renderCtx;
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = Math.floor(window.innerWidth * dpr);
-  canvas.height = Math.floor(window.innerHeight * dpr);
+  state.w = Math.floor(window.innerWidth * dpr);
+  state.h = Math.floor(window.innerHeight * dpr);
+  canvas.width = state.w;
+  canvas.height = state.h;
 
-  const maxW = 960;
-  renderW = Math.max(240, Math.min(maxW, Math.floor(canvas.width * 0.65)));
-  renderH = Math.max(160, Math.floor(renderW * (canvas.height / canvas.width)));
+  const targetW = clamp(Math.floor(state.w * 0.42), 260, 520);
+  state.renderW = targetW;
+  state.renderH = Math.floor(targetW * (state.h / state.w));
 
   renderCanvas = document.createElement('canvas');
-  renderCanvas.width = renderW;
-  renderCanvas.height = renderH;
+  renderCanvas.width = state.renderW;
+  renderCanvas.height = state.renderH;
   renderCtx = renderCanvas.getContext('2d', { alpha: false });
 
-  imageData = renderCtx.createImageData(renderW, renderH);
-  pixels = imageData.data;
-  needsRender = true;
-  row = 0;
+  state.imageData = renderCtx.createImageData(state.renderW, state.renderH);
+  state.pixels = state.imageData.data;
 }
 window.addEventListener('resize', resize);
 resize();
 
-function screenToWorld(px, py) {
-  const s = Math.min(canvas.width, canvas.height);
-  const x = (px - canvas.width * 0.5) / s;
-  const y = (canvas.height * 0.5 - py) / s;
-  return { x: center.x + x * scale, y: center.y + y * scale };
-}
-
-canvas.addEventListener('pointerdown', (e) => {
-  dragging = true;
-  if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
-  last = { x: e.clientX, y: e.clientY };
-});
-canvas.addEventListener('pointerup', (e) => {
-  dragging = false;
-  if (canvas.releasePointerCapture) canvas.releasePointerCapture(e.pointerId);
-});
-canvas.addEventListener('pointermove', (e) => {
-  if (!dragging) return;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const dx = (e.clientX - last.x) * dpr;
-  const dy = (e.clientY - last.y) * dpr;
-  const s = Math.min(canvas.width, canvas.height);
-  center.x -= (dx / s) * scale;
-  center.y += (dy / s) * scale;
-  last = { x: e.clientX, y: e.clientY };
-  needsRender = true;
-  row = 0;
-});
-
-canvas.addEventListener('wheel', (e) => {
-  e.preventDefault();
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const mx = e.clientX * dpr;
-  const my = e.clientY * dpr;
-  const before = screenToWorld(mx, my);
-  const zoom = Math.exp(e.deltaY * 0.0012);
-  scale *= zoom;
-  const after = screenToWorld(mx, my);
-  center.x += before.x - after.x;
-  center.y += before.y - after.y;
-  needsRender = true;
-  row = 0;
-}, { passive: false });
-
-canvas.addEventListener('dblclick', (e) => {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  center = screenToWorld(e.clientX * dpr, e.clientY * dpr);
-  scale *= 0.35;
-  needsRender = true;
-  row = 0;
-});
-
-// Touch pinch zoom
-let touches = new Map();
-let pinchStartDist = null;
-let pinchStartScale = scale;
-canvas.addEventListener('pointerdown', (e) => {
-  if (e.pointerType === 'touch') touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-});
-canvas.addEventListener('pointermove', (e) => {
-  if (e.pointerType !== 'touch' || !touches.has(e.pointerId)) return;
-  touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (touches.size === 2) {
-    const [a, b] = [...touches.values()];
-    const dist = Math.hypot(a.x - b.x, a.y - b.y);
-    if (!pinchStartDist) {
-      pinchStartDist = dist;
-      pinchStartScale = scale;
-    } else if (dist > 0.0001) {
-      scale = pinchStartScale * (pinchStartDist / dist);
-      needsRender = true;
-      row = 0;
-    }
-  }
-});
-canvas.addEventListener('pointerup', (e) => {
-  touches.delete(e.pointerId);
-  if (touches.size < 2) pinchStartDist = null;
-});
-
-const coords = document.getElementById('coords');
-const phaseInput = document.getElementById('phase');
-phaseInput.addEventListener('input', () => {
-  phase = parseFloat(phaseInput.value);
-  needsRender = true;
-  row = 0;
-});
-
 function palette(t) {
-  const a = 6.28318 * (0.2 * t + 0.0 + phase);
-  const b = 6.28318 * (0.45 * t + 0.12 + phase);
-  const c = 6.28318 * (0.75 * t + 0.23 + phase);
+  const p = state.phase;
+  const a = 6.28318 * (0.17 * t + 0.03 + p);
+  const b = 6.28318 * (0.33 * t + 0.11 + p * 0.9);
+  const c = 6.28318 * (0.71 * t + 0.21 + p * 1.1);
   return [
     0.5 + 0.5 * Math.cos(a),
     0.5 + 0.5 * Math.cos(b),
-    0.5 + 0.5 * Math.cos(c)
+    0.5 + 0.5 * Math.cos(c),
   ];
 }
 
-function renderChunk(rowsPerFrame = 24) {
-  if (!needsRender || !pixels) return;
+function mandelEscape(cx, cy, maxIter = 42) {
+  let x = 0, y = 0, i = 0;
+  for (; i < maxIter; i++) {
+    const x2 = x * x - y * y + cx;
+    y = 2 * x * y + cy;
+    x = x2;
+    if (x * x + y * y > 16) break;
+  }
+  return i / maxIter;
+}
 
-  const maxIter = 280;
-  const minSide = Math.min(renderW, renderH);
+function fractalDensity(px, py, pz) {
+  const warpX = px * 1.15 + Math.sin(pz * 0.34) * 0.42;
+  const warpY = py * 1.15 + Math.cos(pz * 0.28) * 0.42;
+  const e = mandelEscape(warpX, warpY, 40);
+  // More detail when near boundary of set.
+  const boundary = 1.0 - Math.abs(e - 0.5) * 2.0;
+  const d = clamp(0.2 * e + 0.8 * boundary, 0, 1);
+  return { d, e };
+}
 
-  for (let n = 0; n < rowsPerFrame && row < renderH; n++, row++) {
-    for (let x = 0; x < renderW; x++) {
-      const u = (x - renderW * 0.5) / minSide;
-      const v = (renderH * 0.5 - row) / minSide;
-      const cx = center.x + u * scale;
-      const cy = center.y + v * scale;
+function renderFrame(dt) {
+  const px = state.pixels;
+  const W = state.renderW;
+  const H = state.renderH;
+  const cam = state.cam;
 
-      let zx = 0;
-      let zy = 0;
-      let i = 0;
-      let m2 = 0;
+  const fov = 1.05;
+  const cosY = Math.cos(cam.yaw);
+  const sinY = Math.sin(cam.yaw);
 
-      for (; i < maxIter; i++) {
-        const zx2 = zx * zx - zy * zy + cx;
-        zy = 2 * zx * zy + cy;
-        zx = zx2;
-        m2 = zx * zx + zy * zy;
-        if (m2 > 256) break;
-      }
+  let sum = 0;
+  let sumSq = 0;
+  let samples = 0;
 
-      const idx = (row * renderW + x) * 4;
-      if (i >= maxIter) {
-        pixels[idx] = 3;
-        pixels[idx + 1] = 4;
-        pixels[idx + 2] = 8;
-        pixels[idx + 3] = 255;
-      } else {
-        let mu = i;
-        if (m2 > 0) {
-          const logZn = Math.log(m2) / 2;
-          const nu = Math.log(Math.max(logZn / Math.log(2), 1e-6)) / Math.log(2);
-          mu = i + 1 - nu;
+  let i = 0;
+  for (let y = 0; y < H; y++) {
+    const ny = (y - H * 0.5) / H;
+    for (let x = 0; x < W; x++) {
+      const nx = (x - W * 0.5) / H;
+
+      // Camera ray
+      let rx = nx * fov;
+      let ry = -ny * fov;
+      let rz = 1.0;
+      const invLen = 1 / Math.hypot(rx, ry, rz);
+      rx *= invLen; ry *= invLen; rz *= invLen;
+
+      // Yaw rotation
+      const rrx = rx * cosY + rz * sinY;
+      const rrz = -rx * sinY + rz * cosY;
+
+      let ar = 0, ag = 0, ab = 0;
+      let trans = 1.0;
+
+      const stepBase = 0.17;
+      for (let s = 0; s < 24; s++) {
+        const t = 0.28 + s * stepBase;
+        const sx = cam.x + rrx * t;
+        const sy = cam.y + ry * t;
+        const sz = cam.z + rrz * t;
+
+        const { d, e } = fractalDensity(sx, sy, sz);
+        const fog = Math.exp(-t * 0.18);
+        const density = clamp((d - 0.22) * 1.15, 0, 1) * fog;
+
+        if (density > 0.001) {
+          const [r, g, b] = palette(e + sz * 0.03 + s * 0.01);
+          const a = density * 0.18;
+          ar += trans * r * a;
+          ag += trans * g * a;
+          ab += trans * b * a;
+          trans *= (1 - a);
+          if (trans < 0.02) break;
         }
-        const t = mu / maxIter;
-        const [r, g, b] = palette(t);
-        pixels[idx] = Math.max(0, Math.min(255, Math.floor((r * 0.92 + 0.08) * 255)));
-        pixels[idx + 1] = Math.max(0, Math.min(255, Math.floor((g * 0.92 + 0.08) * 255)));
-        pixels[idx + 2] = Math.max(0, Math.min(255, Math.floor((b * 0.92 + 0.08) * 255)));
-        pixels[idx + 3] = 255;
+
+        sum += e;
+        sumSq += e * e;
+        samples++;
       }
+
+      // Vignette + tiny glow.
+      const vignette = clamp(1.0 - Math.hypot(nx, ny) * 1.25, 0, 1);
+      ar = (ar + 0.02) * vignette;
+      ag = (ag + 0.025) * vignette;
+      ab = (ab + 0.04) * vignette;
+
+      px[i++] = clamp(Math.floor(ar * 255), 0, 255);
+      px[i++] = clamp(Math.floor(ag * 255), 0, 255);
+      px[i++] = clamp(Math.floor(ab * 255), 0, 255);
+      px[i++] = 255;
     }
   }
 
-  if (row >= renderH) {
-    needsRender = false;
-    row = renderH;
-  }
+  const avg = samples ? sum / samples : 0;
+  const variance = samples ? Math.max(0, sumSq / samples - avg * avg) : 0;
+  const complexity = clamp(avg * 0.8 + Math.sqrt(variance) * 1.25, 0, 1);
+
+  // Smooth complexity so audio doesn't jitter.
+  state.avgEscape = avg;
+  state.complexity = state.complexity * 0.85 + complexity * 0.15;
+
+  renderCtx.putImageData(state.imageData, 0, 0);
+  ctx.fillStyle = '#05070d';
+  ctx.fillRect(0, 0, state.w, state.h);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(renderCanvas, 0, 0, state.w, state.h);
+
+  coords.textContent = `pos=(${cam.x.toFixed(3)}, ${cam.y.toFixed(3)}, ${cam.z.toFixed(3)}) yaw=${cam.yaw.toFixed(2)} complexity=${state.complexity.toFixed(2)}`;
 }
 
-// Ambient generative audio
-const audioBtn = document.getElementById('audioToggle');
-const volInput = document.getElementById('volume');
-let ac, master, running = false, nodes = [];
+function updateMotion(dt) {
+  const cam = state.cam;
+
+  const joyTurn = state.joy.x;
+  const joyThrust = -state.joy.y; // up = forward
+
+  const keyTurn = (state.keys.has('ArrowLeft') ? -1 : 0) + (state.keys.has('ArrowRight') ? 1 : 0);
+  const keyThrust = (state.keys.has('ArrowUp') || state.keys.has('w') ? 1 : 0) + (state.keys.has('ArrowDown') || state.keys.has('s') ? -1 : 0);
+
+  const turn = clamp(joyTurn + keyTurn, -1, 1);
+  const thrust = clamp(joyThrust + keyThrust, -1, 1);
+
+  cam.yaw += turn * dt * 1.6;
+
+  const speed = thrust * dt * 1.9;
+  cam.z += Math.cos(cam.yaw) * speed;
+  cam.x += Math.sin(cam.yaw) * speed;
+
+  // Gentle drift for alive feeling.
+  cam.y = Math.sin(cam.z * 0.23) * 0.16;
+}
+
+phaseInput.addEventListener('input', () => {
+  state.phase = parseFloat(phaseInput.value);
+});
+
+window.addEventListener('keydown', (e) => {
+  state.keys.add(e.key);
+});
+window.addEventListener('keyup', (e) => {
+  state.keys.delete(e.key);
+});
+
+// Joystick
+(function setupJoystick() {
+  if (!joy || !joyKnob) return;
+  let activeId = null;
+
+  function setJoy(clientX, clientY) {
+    const r = joy.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const dx = clientX - cx;
+    const dy = clientY - cy;
+    const max = r.width * 0.36;
+    const len = Math.hypot(dx, dy) || 1;
+    const clamped = Math.min(max, len);
+    const nx = (dx / len) * clamped;
+    const ny = (dy / len) * clamped;
+
+    state.joy.x = clamp(nx / max, -1, 1);
+    state.joy.y = clamp(ny / max, -1, 1);
+    joyKnob.style.transform = `translate(calc(-50% + ${nx}px), calc(-50% + ${ny}px))`;
+  }
+
+  function resetJoy() {
+    state.joy.x = 0;
+    state.joy.y = 0;
+    joyKnob.style.transform = 'translate(-50%,-50%)';
+  }
+
+  joy.addEventListener('pointerdown', (e) => {
+    activeId = e.pointerId;
+    joy.setPointerCapture?.(e.pointerId);
+    setJoy(e.clientX, e.clientY);
+  });
+
+  joy.addEventListener('pointermove', (e) => {
+    if (activeId !== e.pointerId) return;
+    setJoy(e.clientX, e.clientY);
+  });
+
+  function end(e) {
+    if (activeId !== e.pointerId) return;
+    joy.releasePointerCapture?.(e.pointerId);
+    activeId = null;
+    resetJoy();
+  }
+
+  joy.addEventListener('pointerup', end);
+  joy.addEventListener('pointercancel', end);
+})();
+
+// Audio engine influenced by fractal maths (complexity + avg escape)
+let ac = null;
+let master = null;
+let filter = null;
+let running = false;
+let voices = [];
+let lfo = null;
+let lfoGain = null;
 
 function setupAudio() {
   try {
     ac = new (window.AudioContext || window.webkitAudioContext)();
     master = ac.createGain();
+    filter = ac.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 900;
+
     master.gain.value = parseFloat(volInput.value);
+    filter.connect(master);
     master.connect(ac.destination);
 
-    const freqs = [55, 82.41, 123.47, 164.81, 220.0, 329.63];
-    const lfo = ac.createOscillator();
-    const lfoGain = ac.createGain();
-    lfo.type = 'sine';
-    lfo.frequency.value = 0.07;
-    lfoGain.gain.value = 0.12;
-    lfo.connect(lfoGain);
+    const base = 55;
+    const intervals = [0, 3, 7, 10, 12, 15, 19, 24];
 
-    freqs.forEach((f, i) => {
-      const o = ac.createOscillator();
-      const g = ac.createGain();
-      o.type = ['sine', 'triangle', 'sawtooth'][i % 3];
-      o.frequency.value = f;
-      g.gain.value = 0.03;
-
-      if (typeof ac.createStereoPanner === 'function') {
-        const p = ac.createStereoPanner();
-        p.pan.value = -0.8 + (1.6 * (i / (freqs.length - 1)));
-        o.connect(g);
-        g.connect(p);
-        p.connect(master);
-        nodes.push(p);
-      } else {
-        o.connect(g);
-        g.connect(master);
-      }
-
-      lfoGain.connect(g.gain);
-      o.start();
-      nodes.push(o, g);
+    voices = intervals.map((semi, i) => {
+      const osc = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.type = ['sine', 'triangle', 'sawtooth', 'triangle'][i % 4];
+      osc.frequency.value = base * Math.pow(2, semi / 12);
+      gain.gain.value = 0.0;
+      osc.connect(gain);
+      gain.connect(filter);
+      osc.start();
+      return { osc, gain, semi };
     });
 
+    lfo = ac.createOscillator();
+    lfoGain = ac.createGain();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.08;
+    lfoGain.gain.value = 0.25;
+    lfo.connect(lfoGain);
+    lfoGain.connect(filter.frequency);
     lfo.start();
-    nodes.push(lfo, lfoGain);
 
     if (ac.state === 'suspended') ac.resume();
     running = true;
@@ -269,44 +320,60 @@ function setupAudio() {
 
 function teardownAudio() {
   if (!ac) return;
-  nodes.forEach((n) => {
-    try { if (typeof n.stop === 'function') n.stop(); } catch {}
-    try { if (typeof n.disconnect === 'function') n.disconnect(); } catch {}
-  });
-  nodes = [];
+  for (const v of voices) {
+    try { v.osc.stop(); } catch {}
+    try { v.osc.disconnect(); v.gain.disconnect(); } catch {}
+  }
+  voices = [];
+  try { lfo?.stop(); } catch {}
+  try { lfo?.disconnect(); lfoGain?.disconnect(); filter?.disconnect(); master?.disconnect(); } catch {}
   ac.close();
   ac = null;
   running = false;
   audioBtn.textContent = 'Enable';
 }
 
-audioBtn.addEventListener('click', async () => {
+function updateAudioFromFractal() {
+  if (!running || !ac) return;
+
+  const c = state.complexity;
+  const avg = state.avgEscape;
+  const activeVoices = 2 + Math.floor(c * 6); // 2..8 voices
+
+  // Fractal boundary complexity drives harmonic richness.
+  voices.forEach((v, i) => {
+    const target = i < activeVoices ? (0.015 + c * 0.055) * (1 - i * 0.07) : 0.0;
+    v.gain.gain.setTargetAtTime(Math.max(0, target), ac.currentTime, 0.08);
+
+    // Slight detune from average escape to make it math-driven and alive.
+    const detune = (avg - 0.5) * 26 + Math.sin(ac.currentTime * (0.1 + i * 0.03)) * 2.5;
+    v.osc.detune.setTargetAtTime(detune, ac.currentTime, 0.15);
+  });
+
+  filter.frequency.setTargetAtTime(380 + c * 2600, ac.currentTime, 0.12);
+  lfo.frequency.setTargetAtTime(0.04 + c * 0.35, ac.currentTime, 0.2);
+  lfoGain.gain.setTargetAtTime(80 + c * 260, ac.currentTime, 0.2);
+
+  master.gain.setTargetAtTime(parseFloat(volInput.value), ac.currentTime, 0.05);
+}
+
+audioBtn.addEventListener('click', () => {
   if (!running) setupAudio();
   else teardownAudio();
 });
-
 volInput.addEventListener('input', () => {
-  if (master) master.gain.value = parseFloat(volInput.value);
+  if (master && ac) master.gain.setTargetAtTime(parseFloat(volInput.value), ac.currentTime, 0.05);
 });
 
-function drawToScreen() {
-  ctx.fillStyle = '#05070d';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+let last = performance.now();
+function tick(now) {
+  const dt = Math.min(0.04, (now - last) / 1000);
+  last = now;
 
-  if (imageData && renderCtx && renderCanvas) {
-    renderCtx.putImageData(imageData, 0, 0);
-    ctx.save();
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(renderCanvas, 0, 0, canvas.width, canvas.height);
-    ctx.restore();
-  }
+  updateMotion(dt);
+  renderFrame(dt);
+  updateAudioFromFractal();
 
-  coords.textContent = `center=(${center.x.toPrecision(9)}, ${center.y.toPrecision(9)})  zoom=${(2.5 / scale).toFixed(2)}x`;
+  requestAnimationFrame(tick);
 }
-
-function frame() {
-  renderChunk();
-  drawToScreen();
-  requestAnimationFrame(frame);
-}
-requestAnimationFrame(frame);
+requestAnimationFrame(tick);
