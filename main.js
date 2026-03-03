@@ -31,6 +31,10 @@ const state = {
   keys: new Set(),
   complexity: 0.2,
   avgEscape: 0.0,
+  quality: 0.75,
+  marchSteps: 14,
+  frameBudgetMs: 22,
+  frameCounter: 0,
 };
 
 let renderCanvas, renderCtx;
@@ -44,7 +48,7 @@ function resize() {
   canvas.width = state.w;
   canvas.height = state.h;
 
-  const targetW = clamp(Math.floor(state.w * 0.42), 260, 520);
+  const targetW = clamp(Math.floor(state.w * (0.34 * state.quality)), 220, 440);
   state.renderW = targetW;
   state.renderH = Math.floor(targetW * (state.h / state.w));
 
@@ -85,11 +89,30 @@ function mandelEscape(cx, cy, maxIter = 42) {
 function fractalDensity(px, py, pz) {
   const warpX = px * 1.15 + Math.sin(pz * 0.34) * 0.42;
   const warpY = py * 1.15 + Math.cos(pz * 0.28) * 0.42;
-  const e = mandelEscape(warpX, warpY, 40);
-  // More detail when near boundary of set.
+  const e = mandelEscape(warpX, warpY, 36);
   const boundary = 1.0 - Math.abs(e - 0.5) * 2.0;
   const d = clamp(0.2 * e + 0.8 * boundary, 0, 1);
   return { d, e };
+}
+
+function probeScene(cam) {
+  let sum = 0;
+  let sumSq = 0;
+  const N = 28;
+  for (let i = 0; i < N; i++) {
+    const a = (i / N) * Math.PI * 2;
+    const r = 0.28 + (i % 7) * 0.11;
+    const px = cam.x + Math.cos(a + cam.yaw) * r;
+    const py = cam.y + Math.sin(a * 1.7) * 0.22;
+    const pz = cam.z + Math.sin(a + cam.yaw) * r;
+    const { e } = fractalDensity(px, py, pz);
+    sum += e;
+    sumSq += e * e;
+  }
+  const avg = sum / N;
+  const variance = Math.max(0, sumSq / N - avg * avg);
+  const complexity = clamp(avg * 0.55 + Math.sqrt(variance) * 1.7, 0, 1);
+  return { avg, complexity };
 }
 
 function renderFrame(dt) {
@@ -101,10 +124,6 @@ function renderFrame(dt) {
   const fov = 1.05;
   const cosY = Math.cos(cam.yaw);
   const sinY = Math.sin(cam.yaw);
-
-  let sum = 0;
-  let sumSq = 0;
-  let samples = 0;
 
   let i = 0;
   for (let y = 0; y < H; y++) {
@@ -126,8 +145,8 @@ function renderFrame(dt) {
       let ar = 0, ag = 0, ab = 0;
       let trans = 1.0;
 
-      const stepBase = 0.17;
-      for (let s = 0; s < 24; s++) {
+      const stepBase = 0.2;
+      for (let s = 0; s < state.marchSteps; s++) {
         const t = 0.28 + s * stepBase;
         const sx = cam.x + rrx * t;
         const sy = cam.y + ry * t;
@@ -147,9 +166,6 @@ function renderFrame(dt) {
           if (trans < 0.02) break;
         }
 
-        sum += e;
-        sumSq += e * e;
-        samples++;
       }
 
       // Vignette + tiny glow.
@@ -164,14 +180,6 @@ function renderFrame(dt) {
       px[i++] = 255;
     }
   }
-
-  const avg = samples ? sum / samples : 0;
-  const variance = samples ? Math.max(0, sumSq / samples - avg * avg) : 0;
-  const complexity = clamp(avg * 0.8 + Math.sqrt(variance) * 1.25, 0, 1);
-
-  // Smooth complexity so audio doesn't jitter.
-  state.avgEscape = avg;
-  state.complexity = state.complexity * 0.85 + complexity * 0.15;
 
   renderCtx.putImageData(state.imageData, 0, 0);
   ctx.fillStyle = '#05070d';
@@ -188,15 +196,15 @@ function updateMotion(dt) {
   const joyTurn = state.joy.x;
   const joyThrust = -state.joy.y; // up = forward
 
-  const keyTurn = (state.keys.has('ArrowLeft') ? -1 : 0) + (state.keys.has('ArrowRight') ? 1 : 0);
-  const keyThrust = (state.keys.has('ArrowUp') || state.keys.has('w') ? 1 : 0) + (state.keys.has('ArrowDown') || state.keys.has('s') ? -1 : 0);
+  const keyTurn = (state.keys.has('arrowleft') ? -1 : 0) + (state.keys.has('arrowright') ? 1 : 0);
+  const keyThrust = (state.keys.has('arrowup') || state.keys.has('w') ? 1 : 0) + (state.keys.has('arrowdown') || state.keys.has('s') ? -1 : 0);
 
   const turn = clamp(joyTurn + keyTurn, -1, 1);
   const thrust = clamp(joyThrust + keyThrust, -1, 1);
 
-  cam.yaw += turn * dt * 1.6;
+  cam.yaw += turn * dt * 2.25;
 
-  const speed = thrust * dt * 1.9;
+  const speed = thrust * dt * 3.2;
   cam.z += Math.cos(cam.yaw) * speed;
   cam.x += Math.sin(cam.yaw) * speed;
 
@@ -209,10 +217,10 @@ phaseInput.addEventListener('input', () => {
 });
 
 window.addEventListener('keydown', (e) => {
-  state.keys.add(e.key);
+  state.keys.add(String(e.key).toLowerCase());
 });
 window.addEventListener('keyup', (e) => {
-  state.keys.delete(e.key);
+  state.keys.delete(String(e.key).toLowerCase());
 });
 
 // Joystick
@@ -338,19 +346,19 @@ function updateAudioFromFractal() {
 
   const c = state.complexity;
   const avg = state.avgEscape;
-  const activeVoices = 2 + Math.floor(c * 6); // 2..8 voices
+  const camPhase = (Math.sin(state.cam.x * 0.7) + Math.cos(state.cam.z * 0.55)) * 0.5;
+  const activeVoices = 1 + Math.floor(c * 7); // 1..8 voices
 
-  // Fractal boundary complexity drives harmonic richness.
   voices.forEach((v, i) => {
-    const target = i < activeVoices ? (0.015 + c * 0.055) * (1 - i * 0.07) : 0.0;
+    const falloff = Math.max(0.25, 1 - i * 0.11);
+    const target = i < activeVoices ? (0.012 + c * 0.07) * falloff : 0.0;
     v.gain.gain.setTargetAtTime(Math.max(0, target), ac.currentTime, 0.08);
 
-    // Slight detune from average escape to make it math-driven and alive.
-    const detune = (avg - 0.5) * 26 + Math.sin(ac.currentTime * (0.1 + i * 0.03)) * 2.5;
-    v.osc.detune.setTargetAtTime(detune, ac.currentTime, 0.15);
+    const detune = (avg - 0.5) * 42 + camPhase * 24 + Math.sin(ac.currentTime * (0.13 + i * 0.04)) * 4;
+    v.osc.detune.setTargetAtTime(detune, ac.currentTime, 0.12);
   });
 
-  filter.frequency.setTargetAtTime(380 + c * 2600, ac.currentTime, 0.12);
+  filter.frequency.setTargetAtTime(260 + c * 3200 + Math.max(0, camPhase) * 500, ac.currentTime, 0.1);
   lfo.frequency.setTargetAtTime(0.04 + c * 0.35, ac.currentTime, 0.2);
   lfoGain.gain.setTargetAtTime(80 + c * 260, ac.currentTime, 0.2);
 
@@ -367,12 +375,31 @@ volInput.addEventListener('input', () => {
 
 let last = performance.now();
 function tick(now) {
-  const dt = Math.min(0.04, (now - last) / 1000);
+  const frameMs = now - last;
+  const dt = Math.min(0.05, frameMs / 1000);
   last = now;
 
   updateMotion(dt);
+
+  const probe = probeScene(state.cam);
+  state.avgEscape = state.avgEscape * 0.82 + probe.avg * 0.18;
+  state.complexity = state.complexity * 0.82 + probe.complexity * 0.18;
+
   renderFrame(dt);
   updateAudioFromFractal();
+
+  state.frameCounter++;
+  if (state.frameCounter % 20 === 0) {
+    if (frameMs > state.frameBudgetMs + 5 && state.quality > 0.58) {
+      state.quality = clamp(state.quality - 0.06, 0.55, 1.0);
+      state.marchSteps = Math.max(10, state.marchSteps - 1);
+      resize();
+    } else if (frameMs < state.frameBudgetMs - 7 && state.quality < 0.95) {
+      state.quality = clamp(state.quality + 0.03, 0.55, 1.0);
+      state.marchSteps = Math.min(18, state.marchSteps + 1);
+      resize();
+    }
+  }
 
   requestAnimationFrame(tick);
 }
